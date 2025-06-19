@@ -12,29 +12,36 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Prompt dinámico con catálogo
+// Prompt dinámico con catálogo y reglas
 async function generarPromptConCatalogo() {
   const res = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
-  const lista = res.rows.map(p => `• ${p.nombre} - $${p.precio}\n${p.descripcion || ''}`).join('\n\n');
+  const lista = res.rows.map((p, i) =>
+    `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
+  ).join('\n\n');
 
   return `
 Eres un vendedor profesional, amable y claro de MAXIBOLSAS. Atiendes clientes por WhatsApp.
 
-Estos son los productos que tienes disponibles actualmente:
+Estos son los productos que ofreces actualmente:
 
 ${lista}
 
 Todos incluyen envío gratis y se pagan contra entrega.
 
-Tu tarea es:
-- Sugerir el producto más adecuado según lo que el cliente busque
-- Responder dudas de forma breve y útil
-- Invitar a concretar la compra
-- Pedir dirección, número de teléfono y día de entrega cuando el cliente acepte
+REGLAS IMPORTANTES:
 
-⚠️ Mantén los mensajes intermedios cortos y concisos. Habla claro, directo y en español.
+- No sugieras siempre el mismo producto.
+- Si el cliente pide “algo más pequeño”, “algo más barato”, “algo más grueso”, “otras opciones” o “ver más productos”, compara los productos y ofrece la mejor alternativa.
+- Si el cliente ya dijo que no quiere un producto, no lo vuelvas a ofrecer.
+- Sé claro, directo y breve.
+- Si el cliente acepta, pide dirección, número y día de entrega.
 
-Tu estilo debe ser confiable, amable y orientado a cerrar ventas sin presionar.`.trim();
+Ejemplo de estilo:
+Cliente: “Quiero algo más pequeño que la jumbo”
+Tú: “Te recomiendo las bolsas grandes, vienen en paquete de 104 por $320. ¿Te gustaría pedirlas?”
+
+Tu estilo debe ser confiable, amable y orientado a cerrar ventas sin presionar.
+Responde solo en español.`.trim();
 }
 
 // Crear tablas e insertar productos
@@ -96,7 +103,7 @@ app.post('/whatsapp-bot', async (req, res) => {
       [from]
     );
 
-    // Generar prompt dinámico con productos actuales
+    // Generar prompt dinámico con productos actuales y reglas
     const systemPrompt = await generarPromptConCatalogo();
 
     const messages = [
@@ -119,7 +126,7 @@ app.post('/whatsapp-bot', async (req, res) => {
     );
 
     // Enviar respuesta a Twilio
-    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <Response>
   <Message>${gptResponse}</Message>
 </Response>`;
