@@ -1,4 +1,3 @@
-// server.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
@@ -49,23 +48,22 @@ function obtenerSugerencias(historial, productos, rechazados) {
 }
 
 async function generarPrompt(historial, estadoPedido, sugerencias) {
-  let contexto = "";
-
-  if (estadoPedido) {
-    const items = await db.query(
-      "SELECT producto, cantidad, subtotal FROM pedido_items WHERE pedido_id = $1",
-      [estadoPedido.id]
-    );
-
-    const total = items.rows.reduce((acc, row) => acc + parseFloat(row.subtotal), 0).toFixed(2);
-    const listado = items.rows.map(i => `- ${i.producto} x${i.cantidad} = $${parseFloat(i.subtotal).toFixed(2)}`).join('\n');
-
-    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:\n${listado}\nDirección: ${estadoPedido.direccion}\nTel: ${estadoPedido.telefono}\n👉 Total estimado: $${total}\n`;
-  }
-
-  const textoSugerencias = sugerencias.map((p, i) =>
+  const textoSugerencias = sugerencias.length > 0 ? sugerencias.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
-  ).join('\n\n');
+  ).join('\n\n') : 'Por ahora no tengo sugerencias específicas, pero puedo ayudarte a elegir lo mejor según tus necesidades.';
+
+  let contexto = "";
+  if (estadoPedido) {
+    const total = parseFloat(estadoPedido.total || 0).toFixed(2);
+    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:
+- Producto: ${estadoPedido.producto}
+- Dirección: ${estadoPedido.direccion}
+- Tel: ${estadoPedido.telefono}
+- Total estimado: $${total}
+\n👉 Si pregunta por su pedido, confirma que ya está en proceso.
+👉 Si quiere agregar otro producto, sugiere opciones.
+👉 Si pregunta por el total, responde el monto actual.`;
+  }
 
   return `
 Eres un vendedor amable y profesional de MAXIBOLSAS. Atiendes clientes por WhatsApp.
@@ -74,7 +72,7 @@ ${contexto}
 
 Estas son las opciones recomendadas ahora:
 
-${textoSugerencias || 'No hay sugerencias compatibles con lo que el cliente busca.'}
+${textoSugerencias}
 
 Todos los productos incluyen envío gratis y se pagan contra entrega.
 
@@ -127,17 +125,6 @@ function detectarDatosEntrega(texto) {
     `);
 
     await db.query(`
-      CREATE TABLE IF NOT EXISTS pedido_items (
-        id SERIAL PRIMARY KEY,
-        pedido_id INT REFERENCES pedidos(id) ON DELETE CASCADE,
-        producto TEXT NOT NULL,
-        cantidad INT DEFAULT 1,
-        precio_unitario NUMERIC(10,2),
-        subtotal NUMERIC(10,2)
-      );
-    `);
-
-    await db.query(`
       INSERT INTO productos (nombre, descripcion, precio, stock)
       VALUES 
         ('Bolsa negra jumbo', 'Paquete de 100 bolsas de 90×120 cm', 340, 50),
@@ -185,18 +172,10 @@ app.post('/whatsapp-bot', async (req, res) => {
 
     if (!estadoPedido && detectarDatosEntrega(incomingMsg)) {
       const producto = sugerencias[0]?.nombre || 'Producto desconocido';
-      const precio = parseFloat(sugerencias[0]?.precio || 0);
-
-      const pedido = await db.query(
-        "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5) RETURNING id",
-        [from, producto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '', precio]
-      );
-
-      const pedidoId = pedido.rows[0].id;
-
+      const precio = sugerencias[0]?.precio || 0;
       await db.query(
-        "INSERT INTO pedido_items (pedido_id, producto, cantidad, precio_unitario, subtotal) VALUES ($1, $2, $3, $4, $5)",
-        [pedidoId, producto, 1, precio, precio]
+        "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5)",
+        [from, producto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '', precio]
       );
     }
 
@@ -211,7 +190,7 @@ app.post('/whatsapp-bot', async (req, res) => {
       messages
     });
 
-    const gptResponse = completion.choices[0].message.content;
+    const gptResponse = completion.choices[0].message.content || "¡Hola! Estoy aquí para ayudarte con tu pedido de bolsas. ¿Qué necesitas hoy?";
 
     await db.query(
       "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
@@ -228,7 +207,13 @@ app.post('/whatsapp-bot', async (req, res) => {
 
   } catch (error) {
     console.error("GPT error:", error);
-    res.status(500).send("Error interno");
+    const fallback = `Hola, hubo un problema al procesar tu mensaje. Estoy aquí para ayudarte con tus bolsas. ¿Podrías repetir tu consulta?`;
+    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<Response>
+  <Message>${fallback}</Message>
+</Response>`;
+    res.set('Content-Type', 'text/xml');
+    res.send(twiml);
   }
 });
 
