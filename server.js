@@ -1,3 +1,4 @@
+// server.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
@@ -11,14 +12,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
-
-async function generarEmbedding(texto) {
-  const respuesta = await openai.embeddings.create({
-    model: 'text-embedding-ada-002',
-    input: texto
-  });
-  return respuesta.data[0].embedding;
-}
 
 function detectarProductosRechazados(historial, productos) {
   const rechazados = new Set();
@@ -56,15 +49,23 @@ function obtenerSugerencias(historial, productos, rechazados) {
 }
 
 async function generarPrompt(historial, estadoPedido, sugerencias) {
+  let contexto = "";
+
+  if (estadoPedido) {
+    const items = await db.query(
+      "SELECT producto, cantidad, subtotal FROM pedido_items WHERE pedido_id = $1",
+      [estadoPedido.id]
+    );
+
+    const total = items.rows.reduce((acc, row) => acc + parseFloat(row.subtotal), 0).toFixed(2);
+    const listado = items.rows.map(i => `- ${i.producto} x${i.cantidad} = $${parseFloat(i.subtotal).toFixed(2)}`).join('\n');
+
+    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:\n${listado}\nDirección: ${estadoPedido.direccion}\nTel: ${estadoPedido.telefono}\n👉 Total estimado: $${total}\n`;
+  }
+
   const textoSugerencias = sugerencias.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
   ).join('\n\n');
-
-  let contexto = "";
-  if (estadoPedido) {
-    const total = parseFloat(estadoPedido.total || 0).toFixed(2);
-    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:\n- Producto: ${estadoPedido.producto}\n- Dirección: ${estadoPedido.direccion}\n- Tel: ${estadoPedido.telefono}\n- Total estimado: $${total}\n\n👉 Si pregunta por su pedido, confirma que ya está en proceso.\n👉 Si quiere agregar otro producto, sugiere opciones.\n👉 Si pregunta por el total, responde el monto actual.`;
-  }
 
   return `
 Eres un vendedor amable y profesional de MAXIBOLSAS. Atiendes clientes por WhatsApp.
@@ -126,11 +127,13 @@ function detectarDatosEntrega(texto) {
     `);
 
     await db.query(`
-      CREATE TABLE IF NOT EXISTS memoria_vectores (
+      CREATE TABLE IF NOT EXISTS pedido_items (
         id SERIAL PRIMARY KEY,
-        phone TEXT NOT NULL,
-        texto TEXT NOT NULL,
-        embedding VECTOR(1536)
+        pedido_id INT REFERENCES pedidos(id) ON DELETE CASCADE,
+        producto TEXT NOT NULL,
+        cantidad INT DEFAULT 1,
+        precio_unitario NUMERIC(10,2),
+        subtotal NUMERIC(10,2)
       );
     `);
 
@@ -162,21 +165,6 @@ app.post('/whatsapp-bot', async (req, res) => {
       [from, incomingMsg]
     );
 
-    const embedding = await generarEmbedding(incomingMsg);
-    await db.query(
-      "INSERT INTO memoria_vectores (phone, texto, embedding) VALUES ($1, $2, $3)",
-      [from, incomingMsg, embedding]
-    );
-
-    const similitudes = await db.query(`
-      SELECT texto FROM memoria_vectores
-      WHERE phone = $1
-      ORDER BY embedding <-> $2
-      LIMIT 3
-    `, [from, embedding]);
-
-    const recuerdos = similitudes.rows.map(row => ({ role: "user", content: row.texto }));
-
     const result = await db.query(
       "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
       [from]
@@ -197,17 +185,24 @@ app.post('/whatsapp-bot', async (req, res) => {
 
     if (!estadoPedido && detectarDatosEntrega(incomingMsg)) {
       const producto = sugerencias[0]?.nombre || 'Producto desconocido';
-      const precio = sugerencias[0]?.precio || 0;
-      await db.query(
-        "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5)",
+      const precio = parseFloat(sugerencias[0]?.precio || 0);
+
+      const pedido = await db.query(
+        "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5) RETURNING id",
         [from, producto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '', precio]
+      );
+
+      const pedidoId = pedido.rows[0].id;
+
+      await db.query(
+        "INSERT INTO pedido_items (pedido_id, producto, cantidad, precio_unitario, subtotal) VALUES ($1, $2, $3, $4, $5)",
+        [pedidoId, producto, 1, precio, precio]
       );
     }
 
     const systemPrompt = await generarPrompt(historial, estadoPedido, sugerencias);
     const messages = [
       { role: "system", content: systemPrompt },
-      ...recuerdos,
       ...historial.map(row => ({ role: row.role, content: row.message }))
     ];
 
@@ -238,7 +233,7 @@ app.post('/whatsapp-bot', async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("MAXIBOLSAS WhatsApp bot is running con memoria vectorial ✅");
+  res.send("MAXIBOLSAS WhatsApp bot is running con base de datos ✅");
 });
 
 app.listen(port, () => {
