@@ -33,7 +33,6 @@ function detectarProductosRechazados(historial, productos) {
   return Array.from(rechazados);
 }
 
-// Sugerencias personalizadas según intención
 function obtenerSugerencias(historial, productos, rechazados) {
   const ultimos = historial.map(h => h.message.toLowerCase()).join(' ');
   let sugerencias = productos.filter(p => !rechazados.includes(p.nombre.toLowerCase()));
@@ -49,35 +48,40 @@ function obtenerSugerencias(historial, productos, rechazados) {
   return sugerencias.slice(0, 2);
 }
 
-// Prompt dinámico
-async function generarPrompt(historial) {
-  const res = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
-  const productos = res.rows;
-  const rechazados = detectarProductosRechazados(historial, productos);
-  const sugerencias = obtenerSugerencias(historial, productos, rechazados);
-
+async function generarPrompt(historial, estadoPedido, sugerencias) {
   const textoSugerencias = sugerencias.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
   ).join('\n\n');
 
-  return `
-Eres un vendedor profesional y amable de MAXIBOLSAS. Atiendes clientes por WhatsApp.
+  let contexto = "";
+  if (estadoPedido) {
+    contexto = `\n\nEste cliente ya hizo un pedido: ${estadoPedido.producto} el ${estadoPedido.fecha}. Dirección: ${estadoPedido.direccion}. Tel: ${estadoPedido.telefono}`;
+  }
 
-El cliente busca algo específico. Estas son las opciones recomendadas:
+  return `
+Eres un vendedor amable y profesional de MAXIBOLSAS. Atiendes clientes por WhatsApp.
+
+${contexto}
+
+Estas son las opciones recomendadas ahora:
 
 ${textoSugerencias || 'No hay sugerencias compatibles con lo que el cliente busca.'}
 
 Todos los productos incluyen envío gratis y se pagan contra entrega.
 
-Tu tarea es:
-- Sugerir solo productos relevantes y diferentes a los que ya rechazó
-- Ser breve, amable y directo
-- Si el cliente acepta, pedir dirección, número de teléfono y día de entrega
+Tu tarea:
+- Sugerir productos relevantes y distintos a los ya rechazados
+- Si el cliente acepta, pedir dirección, número de teléfono y día de entrega (si aún no lo ha hecho)
+- Ser claro, directo y amable, con mensajes cortos
 
 Responde solo en español.`.trim();
 }
 
-// Crear tablas e insertar productos
+function detectarDatosEntrega(texto) {
+  return texto.includes("calle") || texto.includes("colonia") || texto.includes("número") || /\d{10}/.test(texto);
+}
+
+// Crear tablas
 (async () => {
   try {
     await db.query(`
@@ -98,6 +102,17 @@ Responde solo en español.`.trim();
         precio NUMERIC(10,2) NOT NULL,
         stock INT DEFAULT 0,
         creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS pedidos (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        producto TEXT NOT NULL,
+        direccion TEXT,
+        telefono TEXT,
+        fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
 
@@ -133,12 +148,33 @@ app.post('/whatsapp-bot', async (req, res) => {
       "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
       [from]
     );
+    const historial = result.rows;
 
-    const systemPrompt = await generarPrompt(result.rows);
+    const productosDB = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
+    const productos = productosDB.rows;
 
+    const rechazados = detectarProductosRechazados(historial, productos);
+    const sugerencias = obtenerSugerencias(historial, productos, rechazados);
+
+    const pedidoExistente = await db.query(
+      "SELECT * FROM pedidos WHERE phone = $1 ORDER BY fecha DESC LIMIT 1",
+      [from]
+    );
+    const estadoPedido = pedidoExistente.rows[0] || null;
+
+    // Si mensaje contiene dirección y teléfono y no hay pedido registrado, guardar
+    if (!estadoPedido && detectarDatosEntrega(incomingMsg)) {
+      const ultimoProducto = sugerencias[0]?.nombre || 'Producto desconocido';
+      await db.query(
+        "INSERT INTO pedidos (phone, producto, direccion, telefono) VALUES ($1, $2, $3, $4)",
+        [from, ultimoProducto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '']
+      );
+    }
+
+    const systemPrompt = await generarPrompt(historial, estadoPedido, sugerencias);
     const messages = [
       { role: "system", content: systemPrompt },
-      ...result.rows.map(row => ({ role: row.role, content: row.message }))
+      ...historial.map(row => ({ role: row.role, content: row.message }))
     ];
 
     const completion = await openai.chat.completions.create({
