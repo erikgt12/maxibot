@@ -12,7 +12,6 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Detectar productos rechazados
 function detectarProductosRechazados(historial, productos) {
   const rechazados = new Set();
   historial.forEach(({ role, message }) => {
@@ -55,7 +54,8 @@ async function generarPrompt(historial, estadoPedido, sugerencias) {
 
   let contexto = "";
   if (estadoPedido) {
-    contexto = `\n\nEste cliente ya hizo un pedido: ${estadoPedido.producto} el ${estadoPedido.fecha}. Dirección: ${estadoPedido.direccion}. Tel: ${estadoPedido.telefono}`;
+    const total = parseFloat(estadoPedido.total || 0).toFixed(2);
+    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:\n- Producto: ${estadoPedido.producto}\n- Dirección: ${estadoPedido.direccion}\n- Tel: ${estadoPedido.telefono}\n- Total estimado: $${total}\n\n👉 Si pregunta por su pedido, confirma que ya está en proceso.\n👉 Si quiere agregar otro producto, sugiere opciones.\n👉 Si pregunta por el total, responde el monto actual.`;
   }
 
   return `
@@ -72,6 +72,7 @@ Todos los productos incluyen envío gratis y se pagan contra entrega.
 Tu tarea:
 - Sugerir productos relevantes y distintos a los ya rechazados
 - Si el cliente acepta, pedir dirección, número de teléfono y día de entrega (si aún no lo ha hecho)
+- Si el cliente ya tiene pedido, actuar en consecuencia (seguimiento, total, agregar producto, etc.)
 - Ser claro, directo y amable, con mensajes cortos
 
 Responde solo en español.`.trim();
@@ -81,7 +82,6 @@ function detectarDatosEntrega(texto) {
   return texto.includes("calle") || texto.includes("colonia") || texto.includes("número") || /\d{10}/.test(texto);
 }
 
-// Crear tablas
 (async () => {
   try {
     await db.query(`
@@ -112,6 +112,7 @@ function detectarDatosEntrega(texto) {
         producto TEXT NOT NULL,
         direccion TEXT,
         telefono TEXT,
+        total NUMERIC(10,2),
         fecha TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
@@ -162,12 +163,12 @@ app.post('/whatsapp-bot', async (req, res) => {
     );
     const estadoPedido = pedidoExistente.rows[0] || null;
 
-    // Si mensaje contiene dirección y teléfono y no hay pedido registrado, guardar
     if (!estadoPedido && detectarDatosEntrega(incomingMsg)) {
-      const ultimoProducto = sugerencias[0]?.nombre || 'Producto desconocido';
+      const producto = sugerencias[0]?.nombre || 'Producto desconocido';
+      const precio = sugerencias[0]?.precio || 0;
       await db.query(
-        "INSERT INTO pedidos (phone, producto, direccion, telefono) VALUES ($1, $2, $3, $4)",
-        [from, ultimoProducto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '']
+        "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5)",
+        [from, producto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '', precio]
       );
     }
 
