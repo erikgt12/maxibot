@@ -12,10 +12,32 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+// Detectar productos rechazados en mensajes anteriores
+function detectarProductosRechazados(historial, productos) {
+  const rechazados = new Set();
+  historial.forEach(({ role, message }) => {
+    if (role === 'user') {
+      productos.forEach(p => {
+        const nombre = p.nombre.toLowerCase();
+        if (message.toLowerCase().includes(`no quiero ${nombre}`) ||
+            message.toLowerCase().includes(`otra que no sea ${nombre}`) ||
+            message.toLowerCase().includes(`no ${nombre}`)) {
+          rechazados.add(nombre);
+        }
+      });
+    }
+  });
+  return Array.from(rechazados);
+}
+
 // Prompt dinámico con catálogo y reglas
-async function generarPromptConCatalogo() {
+async function generarPromptConCatalogo(historial) {
   const res = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
-  const lista = res.rows.map((p, i) =>
+  const productos = res.rows;
+  const rechazados = detectarProductosRechazados(historial, productos);
+  const filtrados = productos.filter(p => !rechazados.includes(p.nombre.toLowerCase()));
+
+  const lista = filtrados.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
   ).join('\n\n');
 
@@ -24,15 +46,14 @@ Eres un vendedor profesional, amable y claro de MAXIBOLSAS. Atiendes clientes po
 
 Estos son los productos que ofreces actualmente:
 
-${lista}
+${lista || 'Ningún producto coincide con lo que el cliente quiere.'}
 
 Todos incluyen envío gratis y se pagan contra entrega.
 
 REGLAS IMPORTANTES:
 
-- No sugieras siempre el mismo producto.
+- No sugieras productos que el cliente ya rechazó.
 - Si el cliente pide “algo más pequeño”, “algo más barato”, “algo más grueso”, “otras opciones” o “ver más productos”, compara los productos y ofrece la mejor alternativa.
-- Si el cliente ya dijo que no quiere un producto, no lo vuelvas a ofrecer.
 - Sé claro, directo y breve.
 - Si el cliente acepta, pide dirección, número y día de entrega.
 
@@ -104,7 +125,7 @@ app.post('/whatsapp-bot', async (req, res) => {
     );
 
     // Generar prompt dinámico con productos actuales y reglas
-    const systemPrompt = await generarPromptConCatalogo();
+    const systemPrompt = await generarPromptConCatalogo(result.rows);
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -147,3 +168,4 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
+
