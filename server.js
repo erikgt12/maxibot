@@ -1,18 +1,7 @@
-// 📁 db.js
-const { Pool } = require('pg');
-
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false },
-});
-
-module.exports = pool;
-
-
-// 📁 server.js
 const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
+const db = require('./db'); // Asegúrate de que db.js esté en el mismo directorio
 require('dotenv').config();
 
 const app = express();
@@ -23,6 +12,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+// Catálogo / personalidad del bot
 const systemPrompt = `
 Eres un vendedor profesional y amable de MAXIBOLSAS. Atiendes clientes por WhatsApp.
 
@@ -56,6 +46,24 @@ Tu tarea es:
 Responde solo en español, de manera clara, amable y directa.
 `;
 
+// Crear la tabla si no existe
+(async () => {
+  try {
+    await db.query(`
+      CREATE TABLE IF NOT EXISTS chat_history (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        role TEXT NOT NULL,
+        message TEXT NOT NULL,
+        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+    console.log("✅ Tabla chat_history lista");
+  } catch (error) {
+    console.error("❌ Error al crear la tabla:", error);
+  }
+})();
+
 app.post('/whatsapp-bot', async (req, res) => {
   const incomingMsg = req.body.Body;
   const from = req.body.From;
@@ -64,16 +72,38 @@ app.post('/whatsapp-bot', async (req, res) => {
   console.log("De:", from);
 
   try {
+    // Guardar mensaje del usuario
+    await db.query(
+      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'user', $2)",
+      [from, incomingMsg]
+    );
+
+    // Leer últimos mensajes del mismo cliente
+    const result = await db.query(
+      "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
+      [from]
+    );
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...result.rows.map(row => ({ role: row.role, content: row.message }))
+    ];
+
+    // Respuesta desde OpenAI
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: incomingMsg }
-      ],
+      messages
     });
 
     const gptResponse = completion.choices[0].message.content;
 
+    // Guardar respuesta del bot
+    await db.query(
+      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
+      [from, gptResponse]
+    );
+
+    // Enviar a Twilio
     const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Message>${gptResponse}</Message>
@@ -81,6 +111,7 @@ app.post('/whatsapp-bot', async (req, res) => {
 
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
+
   } catch (error) {
     console.error("GPT error:", error);
     res.status(500).send("Error interno");
@@ -88,7 +119,7 @@ app.post('/whatsapp-bot', async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("MAXIBOLSAS WhatsApp bot is running.");
+  res.send("MAXIBOLSAS WhatsApp bot is running con base de datos ✅");
 });
 
 app.listen(port, () => {
