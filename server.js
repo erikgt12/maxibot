@@ -50,7 +50,7 @@ function obtenerSugerencias(historial, productos, rechazados) {
 async function generarPrompt(historial, estadoPedido, sugerencias) {
   const textoSugerencias = sugerencias.length > 0 ? sugerencias.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
-  ).join('\n\n') : 'Por ahora no tengo sugerencias específicas, pero puedo ayudarte a elegir lo mejor según tus necesidades.';
+  ).join('\n\n') : 'Actualmente no hay productos compatibles con tu búsqueda. ¿Podrías especificar mejor lo que necesitas?';
 
   let contexto = "";
   if (estadoPedido) {
@@ -190,7 +190,7 @@ app.post('/whatsapp-bot', async (req, res) => {
       messages
     });
 
-    const gptResponse = completion.choices[0].message.content || "¡Hola! Estoy aquí para ayudarte con tu pedido de bolsas. ¿Qué necesitas hoy?";
+    const gptResponse = completion.choices[0]?.message?.content || "Lo siento, no entendí bien tu mensaje. ¿Podrías repetirlo o decirme cómo puedo ayudarte con tus bolsas?";
 
     await db.query(
       "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
@@ -207,10 +207,14 @@ app.post('/whatsapp-bot', async (req, res) => {
 
   } catch (error) {
     console.error("GPT error:", error);
-    const fallback = `Hola, hubo un problema al procesar tu mensaje. Estoy aquí para ayudarte con tus bolsas. ¿Podrías repetir tu consulta?`;
+    const fallbackResponse = "Hubo un error procesando tu mensaje. Estoy aquí para ayudarte, ¿puedes intentar nuevamente?";
+    await db.query(
+      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
+      [from, fallbackResponse]
+    );
     const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <Response>
-  <Message>${fallback}</Message>
+  <Message>${fallbackResponse}</Message>
 </Response>`;
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
