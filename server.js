@@ -41,10 +41,10 @@ Mensaje del cliente: "${incomingMsg}"
 
     const gptResponse = completion.choices[0].message.content;
 
-    const twiml = \`<?xml version="1.0" encoding="UTF-8"?>
+   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-  <Message>\${gptResponse}</Message>
-</Response>\`;
+  <Message>${gptResponse}</Message>
+</Response>`;
 
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
