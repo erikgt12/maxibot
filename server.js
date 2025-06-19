@@ -58,6 +58,16 @@ Responde solo en español, de manera clara, amable y directa.
         timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+     await db.query(`
+      CREATE TABLE IF NOT EXISTS productos (
+        id SERIAL PRIMARY KEY,
+        nombre TEXT NOT NULL,
+        descripcion TEXT,
+        precio NUMERIC(10,2) NOT NULL,
+        stock INT DEFAULT 0,
+        creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
     console.log("✅ Tabla chat_history lista");
   } catch (error) {
     console.error("❌ Error al crear la tabla:", error);
