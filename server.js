@@ -12,16 +12,19 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Detectar productos rechazados en mensajes anteriores
+// Detectar productos rechazados
 function detectarProductosRechazados(historial, productos) {
   const rechazados = new Set();
   historial.forEach(({ role, message }) => {
     if (role === 'user') {
       productos.forEach(p => {
         const nombre = p.nombre.toLowerCase();
-        if (message.toLowerCase().includes(`no quiero ${nombre}`) ||
-            message.toLowerCase().includes(`otra que no sea ${nombre}`) ||
-            message.toLowerCase().includes(`no ${nombre}`)) {
+        const msg = message.toLowerCase();
+        if (msg.includes(`no quiero ${nombre}`) ||
+            msg.includes(`otra que no sea ${nombre}`) ||
+            msg.includes(`no ${nombre}`) ||
+            msg.includes(`no quiero jumbo`) ||
+            msg.includes(`no jumbo`)) {
           rechazados.add(nombre);
         }
       });
@@ -30,38 +33,47 @@ function detectarProductosRechazados(historial, productos) {
   return Array.from(rechazados);
 }
 
-// Prompt dinámico con catálogo y reglas
-async function generarPromptConCatalogo(historial) {
+// Sugerencias personalizadas según intención
+function obtenerSugerencias(historial, productos, rechazados) {
+  const ultimos = historial.map(h => h.message.toLowerCase()).join(' ');
+  let sugerencias = productos.filter(p => !rechazados.includes(p.nombre.toLowerCase()));
+
+  if (ultimos.includes("pequeño") || ultimos.includes("más chico")) {
+    sugerencias = sugerencias.filter(p => p.nombre.toLowerCase().includes("grande"));
+  } else if (ultimos.includes("gruesa") || ultimos.includes("resistente")) {
+    sugerencias = sugerencias.filter(p => p.nombre.toLowerCase().includes("gruesa"));
+  } else if (ultimos.includes("barato")) {
+    sugerencias.sort((a, b) => parseFloat(a.precio) - parseFloat(b.precio));
+  }
+
+  return sugerencias.slice(0, 2);
+}
+
+// Prompt dinámico
+async function generarPrompt(historial) {
   const res = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
   const productos = res.rows;
   const rechazados = detectarProductosRechazados(historial, productos);
-  const filtrados = productos.filter(p => !rechazados.includes(p.nombre.toLowerCase()));
+  const sugerencias = obtenerSugerencias(historial, productos, rechazados);
 
-  const lista = filtrados.map((p, i) =>
+  const textoSugerencias = sugerencias.map((p, i) =>
     `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
   ).join('\n\n');
 
   return `
-Eres un vendedor profesional, amable y claro de MAXIBOLSAS. Atiendes clientes por WhatsApp.
+Eres un vendedor profesional y amable de MAXIBOLSAS. Atiendes clientes por WhatsApp.
 
-Estos son los productos que ofreces actualmente:
+El cliente busca algo específico. Estas son las opciones recomendadas:
 
-${lista || 'Ningún producto coincide con lo que el cliente quiere.'}
+${textoSugerencias || 'No hay sugerencias compatibles con lo que el cliente busca.'}
 
-Todos incluyen envío gratis y se pagan contra entrega.
+Todos los productos incluyen envío gratis y se pagan contra entrega.
 
-REGLAS IMPORTANTES:
+Tu tarea es:
+- Sugerir solo productos relevantes y diferentes a los que ya rechazó
+- Ser breve, amable y directo
+- Si el cliente acepta, pedir dirección, número de teléfono y día de entrega
 
-- No sugieras productos que el cliente ya rechazó.
-- Si el cliente pide “algo más pequeño”, “algo más barato”, “algo más grueso”, “otras opciones” o “ver más productos”, compara los productos y ofrece la mejor alternativa.
-- Sé claro, directo y breve.
-- Si el cliente acepta, pide dirección, número y día de entrega.
-
-Ejemplo de estilo:
-Cliente: “Quiero algo más pequeño que la jumbo”
-Tú: “Te recomiendo las bolsas grandes, vienen en paquete de 104 por $320. ¿Te gustaría pedirlas?”
-
-Tu estilo debe ser confiable, amable y orientado a cerrar ventas sin presionar.
 Responde solo en español.`.trim();
 }
 
@@ -112,27 +124,23 @@ app.post('/whatsapp-bot', async (req, res) => {
   console.log("De:", from);
 
   try {
-    // Guardar mensaje del usuario
     await db.query(
       "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'user', $2)",
       [from, incomingMsg]
     );
 
-    // Leer historial reciente
     const result = await db.query(
       "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
       [from]
     );
 
-    // Generar prompt dinámico con productos actuales y reglas
-    const systemPrompt = await generarPromptConCatalogo(result.rows);
+    const systemPrompt = await generarPrompt(result.rows);
 
     const messages = [
       { role: "system", content: systemPrompt },
       ...result.rows.map(row => ({ role: row.role, content: row.message }))
     ];
 
-    // Obtener respuesta del modelo
     const completion = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages
@@ -140,13 +148,11 @@ app.post('/whatsapp-bot', async (req, res) => {
 
     const gptResponse = completion.choices[0].message.content;
 
-    // Guardar respuesta
     await db.query(
       "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
       [from, gptResponse]
     );
 
-    // Enviar respuesta a Twilio
     const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <Response>
   <Message>${gptResponse}</Message>
@@ -168,4 +174,3 @@ app.get("/", (req, res) => {
 app.listen(port, () => {
   console.log("Server running on port " + port);
 });
-
