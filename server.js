@@ -1,4 +1,3 @@
-
 const express = require('express');
 const bodyParser = require('body-parser');
 const { OpenAI } = require('openai');
@@ -17,6 +16,10 @@ app.use(bodyParser.json());
 app.post('/whatsapp-bot', async (req, res) => {
   const incomingMsg = req.body.Body;
   const from = req.body.From;
+
+  // ✅ Aquí están los logs donde sí pueden usarse:
+  console.log("Mensaje recibido:", incomingMsg);
+  console.log("De:", from);
 
   const prompt = `
 Eres un vendedor amable y directo de MAXIBOLSAS. Estás hablando por WhatsApp con un cliente interesado en comprar bolsas de basura negras calibre 200. 
@@ -41,7 +44,7 @@ Mensaje del cliente: "${incomingMsg}"
 
     const gptResponse = completion.choices[0].message.content;
 
-   const twiml = `<?xml version="1.0" encoding="UTF-8"?>
+    const twiml = `<?xml version="1.0" encoding="UTF-8"?>
 <Response>
   <Message>${gptResponse}</Message>
 </Response>`;
@@ -60,7 +63,4 @@ app.get("/", (req, res) => {
 
 app.listen(port, () => {
   console.log("Server running on port " + port);
-
-  console.log("Mensaje recibido:", incomingMsg);
-console.log("De:", from);
 });
