@@ -68,6 +68,14 @@ Responde solo en español, de manera clara, amable y directa.
         creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
     `);
+     await db.query(`
+  INSERT INTO productos (nombre, descripcion, precio, stock)
+  VALUES 
+    ('Bolsa negra jumbo', 'Paquete de 100 bolsas de 90×120 cm', 340, 50),
+    ('Bolsa grande', 'Paquete de 104 bolsas de 70×90 cm', 320, 40),
+    ('Bolsa gruesa por kilo', '5 kilos (~50 bolsas) de calibre 200, baja densidad', 340, 30)
+  ON CONFLICT DO NOTHING;
+`);
     console.log("✅ Tabla chat_history lista");
   } catch (error) {
     console.error("❌ Error al crear la tabla:", error);
