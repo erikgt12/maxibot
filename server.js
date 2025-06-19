@@ -12,6 +12,14 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
+async function generarEmbedding(texto) {
+  const respuesta = await openai.embeddings.create({
+    model: 'text-embedding-ada-002',
+    input: texto
+  });
+  return respuesta.data[0].embedding;
+}
+
 function detectarProductosRechazados(historial, productos) {
   const rechazados = new Set();
   historial.forEach(({ role, message }) => {
@@ -118,6 +126,15 @@ function detectarDatosEntrega(texto) {
     `);
 
     await db.query(`
+      CREATE TABLE IF NOT EXISTS memoria_vectores (
+        id SERIAL PRIMARY KEY,
+        phone TEXT NOT NULL,
+        texto TEXT NOT NULL,
+        embedding VECTOR(1536)
+      );
+    `);
+
+    await db.query(`
       INSERT INTO productos (nombre, descripcion, precio, stock)
       VALUES 
         ('Bolsa negra jumbo', 'Paquete de 100 bolsas de 90×120 cm', 340, 50),
@@ -144,6 +161,21 @@ app.post('/whatsapp-bot', async (req, res) => {
       "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'user', $2)",
       [from, incomingMsg]
     );
+
+    const embedding = await generarEmbedding(incomingMsg);
+    await db.query(
+      "INSERT INTO memoria_vectores (phone, texto, embedding) VALUES ($1, $2, $3)",
+      [from, incomingMsg, embedding]
+    );
+
+    const similitudes = await db.query(`
+      SELECT texto FROM memoria_vectores
+      WHERE phone = $1
+      ORDER BY embedding <-> $2
+      LIMIT 3
+    `, [from, embedding]);
+
+    const recuerdos = similitudes.rows.map(row => ({ role: "user", content: row.texto }));
 
     const result = await db.query(
       "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
@@ -175,6 +207,7 @@ app.post('/whatsapp-bot', async (req, res) => {
     const systemPrompt = await generarPrompt(historial, estadoPedido, sugerencias);
     const messages = [
       { role: "system", content: systemPrompt },
+      ...recuerdos,
       ...historial.map(row => ({ role: row.role, content: row.message }))
     ];
 
@@ -205,7 +238,7 @@ app.post('/whatsapp-bot', async (req, res) => {
 });
 
 app.get("/", (req, res) => {
-  res.send("MAXIBOLSAS WhatsApp bot is running con base de datos ✅");
+  res.send("MAXIBOLSAS WhatsApp bot is running con memoria vectorial ✅");
 });
 
 app.listen(port, () => {
