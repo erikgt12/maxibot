@@ -6,84 +6,10 @@ require('dotenv').config();
 
 const app = express();
 const port = process.env.PORT || 3000;
-
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
-
-function detectarProductosRechazados(historial, productos) {
-  const rechazados = new Set();
-  historial.forEach(({ role, message }) => {
-    if (role === 'user') {
-      productos.forEach(p => {
-        const nombre = p.nombre.toLowerCase();
-        const msg = message.toLowerCase();
-        if (msg.includes(`no quiero ${nombre}`) ||
-            msg.includes(`otra que no sea ${nombre}`) ||
-            msg.includes(`no ${nombre}`) ||
-            msg.includes(`no quiero jumbo`) ||
-            msg.includes(`no jumbo`)) {
-          rechazados.add(nombre);
-        }
-      });
-    }
-  });
-  return Array.from(rechazados);
-}
-
-function obtenerSugerencias(historial, productos, rechazados) {
-  const ultimos = historial.map(h => h.message.toLowerCase()).join(' ');
-  let sugerencias = productos.filter(p => !rechazados.includes(p.nombre.toLowerCase()));
-
-  if (ultimos.includes("pequeño") || ultimos.includes("más chico")) {
-    sugerencias = sugerencias.filter(p => p.nombre.toLowerCase().includes("grande"));
-  } else if (ultimos.includes("gruesa") || ultimos.includes("resistente")) {
-    sugerencias = sugerencias.filter(p => p.nombre.toLowerCase().includes("gruesa"));
-  } else if (ultimos.includes("barato")) {
-    sugerencias.sort((a, b) => parseFloat(a.precio) - parseFloat(b.precio));
-  }
-
-  return sugerencias.slice(0, 2);
-}
-
-async function generarPrompt(historial, estadoPedido, sugerencias) {
-  const textoSugerencias = sugerencias.length > 0 ? sugerencias.map((p, i) =>
-    `${i + 1}. ${p.nombre.toUpperCase()} - $${p.precio}\n${p.descripcion || ''}`
-  ).join('\n\n') : 'Actualmente no hay productos compatibles con tu búsqueda. ¿Podrías especificar mejor lo que necesitas?';
-
-  let contexto = "";
-  if (estadoPedido) {
-    const total = parseFloat(estadoPedido.total || 0).toFixed(2);
-    contexto = `\n\nEste cliente ya hizo un pedido el ${new Date(estadoPedido.fecha).toLocaleDateString()}:
-- Producto: ${estadoPedido.producto}
-- Dirección: ${estadoPedido.direccion}
-- Tel: ${estadoPedido.telefono}
-- Total estimado: $${total}
-\n👉 Si pregunta por su pedido, confirma que ya está en proceso.
-👉 Si quiere agregar otro producto, sugiere opciones.
-👉 Si pregunta por el total, responde el monto actual.`;
-  }
-
-  return `
-Eres un vendedor amable y profesional de MAXIBOLSAS. Atiendes clientes por WhatsApp.
-
-${contexto}
-
-Estas son las opciones recomendadas ahora:
-
-${textoSugerencias}
-
-Todos los productos incluyen envío gratis y se pagan contra entrega.
-
-Tu tarea:
-- Sugerir productos relevantes y distintos a los ya rechazados
-- Si el cliente acepta, pedir dirección, número de teléfono y día de entrega (si aún no lo ha hecho)
-- Si el cliente ya tiene pedido, actuar en consecuencia (seguimiento, total, agregar producto, etc.)
-- Ser claro, directo y amable, con mensajes cortos
-
-Responde solo en español.`.trim();
-}
 
 function detectarDatosEntrega(texto) {
   return texto.includes("calle") || texto.includes("colonia") || texto.includes("número") || /\d{10}/.test(texto);
@@ -143,43 +69,30 @@ app.post('/whatsapp-bot', async (req, res) => {
   const incomingMsg = req.body.Body;
   const from = req.body.From;
 
-  console.log("Mensaje recibido:", incomingMsg);
-  console.log("De:", from);
-
   try {
-    await db.query(
-      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'user', $2)",
-      [from, incomingMsg]
-    );
+    await db.query("INSERT INTO chat_history (phone, role, message) VALUES ($1, 'user', $2)", [from, incomingMsg]);
 
-    const result = await db.query(
-      "SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10",
-      [from]
-    );
+    const result = await db.query("SELECT role, message FROM chat_history WHERE phone = $1 ORDER BY timestamp ASC LIMIT 10", [from]);
     const historial = result.rows;
 
-    const productosDB = await db.query(`SELECT nombre, descripcion, precio FROM productos`);
-    const productos = productosDB.rows;
+    const productos = (await db.query("SELECT nombre, descripcion, precio FROM productos")).rows;
 
-    const rechazados = detectarProductosRechazados(historial, productos);
-    const sugerencias = obtenerSugerencias(historial, productos, rechazados);
+    const pedidoExistente = (await db.query("SELECT * FROM pedidos WHERE phone = $1 ORDER BY fecha DESC LIMIT 1", [from])).rows[0] || null;
 
-    const pedidoExistente = await db.query(
-      "SELECT * FROM pedidos WHERE phone = $1 ORDER BY fecha DESC LIMIT 1",
-      [from]
-    );
-    const estadoPedido = pedidoExistente.rows[0] || null;
-
-    if (!estadoPedido && detectarDatosEntrega(incomingMsg)) {
-      const producto = sugerencias[0]?.nombre || 'Producto desconocido';
-      const precio = sugerencias[0]?.precio || 0;
+    if (!pedidoExistente && detectarDatosEntrega(incomingMsg)) {
+      const producto = productos[0]?.nombre || 'Producto';
+      const precio = productos[0]?.precio || 0;
       await db.query(
         "INSERT INTO pedidos (phone, producto, direccion, telefono, total) VALUES ($1, $2, $3, $4, $5)",
         [from, producto, incomingMsg, incomingMsg.match(/\d{10}/)?.[0] || '', precio]
       );
     }
 
-    const systemPrompt = await generarPrompt(historial, estadoPedido, sugerencias);
+    const systemPrompt = `
+Eres un vendedor amable y profesional de MAXIBOLSAS. Atiendes clientes por WhatsApp.
+Todos los productos incluyen envío gratis y se pagan contra entrega.
+Responde en mensajes breves, claros y sólo en español.`;
+
     const messages = [
       { role: "system", content: systemPrompt },
       ...historial.map(row => ({ role: row.role, content: row.message }))
@@ -190,39 +103,27 @@ app.post('/whatsapp-bot', async (req, res) => {
       messages
     });
 
-    const gptResponse = completion.choices[0]?.message?.content || "Lo siento, no entendí bien tu mensaje. ¿Podrías repetirlo o decirme cómo puedo ayudarte con tus bolsas?";
+    const gptResponse = completion.choices[0]?.message?.content?.trim() || "¡Hola! ¿En qué puedo ayudarte con nuestras bolsas? ☺️";
 
-    await db.query(
-      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
-      [from, gptResponse]
-    );
+    await db.query("INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)", [from, gptResponse]);
 
-    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<Response>
-  <Message>${gptResponse}</Message>
-</Response>`;
+    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n  <Message>${gptResponse}</Message>\n</Response>`;
 
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
 
   } catch (error) {
     console.error("GPT error:", error);
-    const fallbackResponse = "Hubo un error procesando tu mensaje. Estoy aquí para ayudarte, ¿puedes intentar nuevamente?";
-    await db.query(
-      "INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)",
-      [from, fallbackResponse]
-    );
-    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>
-<Response>
-  <Message>${fallbackResponse}</Message>
-</Response>`;
+    const fallback = "Ocurrió un error, pero estoy aquí para ayudarte. ¡Intenta enviar tu mensaje otra vez!";
+    await db.query("INSERT INTO chat_history (phone, role, message) VALUES ($1, 'assistant', $2)", [from, fallback]);
+    const twiml = `<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response>\n  <Message>${fallback}</Message>\n</Response>`;
     res.set('Content-Type', 'text/xml');
     res.send(twiml);
   }
 });
 
 app.get("/", (req, res) => {
-  res.send("MAXIBOLSAS WhatsApp bot is running con base de datos ✅");
+  res.send("MAXIBOLSAS WhatsApp bot is running ✅");
 });
 
 app.listen(port, () => {
